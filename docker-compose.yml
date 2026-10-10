@@ -1,0 +1,35 @@
+name: family-wiki-mcp
+
+services:
+  family-wiki-mcp:
+    build: .
+    container_name: family-wiki-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      PUBLIC_HOST: mcp.wiki.aldenback.com
+      WIKI_URL: https://wiki.aldenback.com/graphql
+      WIKI_TOKEN_FILE: /run/secrets/wiki-api-token
+      WIKI_LOCALE: sv
+      WIKI_EDITOR: markdown
+      ALLOWED_PREFIXES: "projekt/,familj/,studier/,handbok/"
+    volumes:
+      - /root/wiki/.api-token:/run/secrets/wiki-api-token:ro
+    expose:
+      - "8080"
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  proxy:
+    external: true
+    name: proxy

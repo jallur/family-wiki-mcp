@@ -1,0 +1,10 @@
+URL (works now, no new DNS): https://wiki.aldenback.com/mcp
+URL (preferred after DNS): https://mcp.wiki.aldenback.com/mcp
+Auth header: Authorization: Bearer <key>
+Also accepted: X-API-Key: <key>
+Key file: /root/family-wiki-mcp/.mcp-api-key (mode 600)
+Env: /root/family-wiki-mcp/.env (mode 600)
+Allowlist: projekt/,familj/,studier/,handbok/
+No delete in v1 (tools limited in app)
+Health: /health (no auth)
+DNS needed: A mcp.wiki.aldenback.com -> 157.180.42.121
