@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .digest import const_eq
+from .identity import identity_name_ok
 
 log = logging.getLogger("wiki-mcp")
 
@@ -57,6 +58,7 @@ class KeyRecord:
     disabled: bool
     created: str
     author: str
+    wiki_identity: str
 
     @property
     def expired(self) -> bool:
@@ -98,6 +100,13 @@ def parse_keys(data: Any) -> list[KeyRecord]:
             raise ValueError(f"post {index} har ogiltig created")
         if not isinstance(item["author"], str):
             raise ValueError(f"post {index} har ogiltig author")
+        raw_identity = item.get("wiki_identity")
+        if raw_identity is None or raw_identity == "":
+            wiki_identity = ""
+        elif isinstance(raw_identity, str) and identity_name_ok(raw_identity.strip()):
+            wiki_identity = raw_identity.strip()
+        else:
+            raise ValueError(f"post {index} har ogiltig wiki_identity")
         if name in names or digest in hashes:
             raise ValueError(f"post {index} har duplicerat namn eller hash")
         names.add(name)
@@ -113,6 +122,7 @@ def parse_keys(data: Any) -> list[KeyRecord]:
                 disabled=item["disabled"],
                 created=item["created"].strip(),
                 author=item["author"],
+                wiki_identity=wiki_identity,
             )
         )
     return records

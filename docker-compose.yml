@@ -20,8 +20,13 @@ services:
       TOKEN_STORE_PATH: /data/oauth-tokens.json
       ALLOW_LEGACY_API_KEY: "true"
       FORWARDED_ALLOW_IPS: "172.20.0.2,158.174.102.122"
+      IDENTITY_KEY_FILE: /run/secrets/identity-key
+      IDENTITY_STORE_DIR: /data/identities
+      IDENTITY_FALLBACK: "true"
+      IDENTITY_RENEW_SECONDS: "43200"
     volumes:
       - /root/wiki/.api-token:/run/secrets/wiki-api-token:ro
+      - /root/family-wiki-mcp/identity.key:/run/secrets/identity-key:ro
       - /root/family-wiki-mcp/keys:/run/secrets/keys:ro
       - /root/family-wiki-mcp/data:/data
     expose:

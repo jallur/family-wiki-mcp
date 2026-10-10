@@ -32,6 +32,10 @@ class Settings:
     token_store_path: str
     allow_legacy_api_key: bool
     forwarded_allow_ips: str
+    identity_key_file: str
+    identity_store_dir: str
+    identity_fallback: bool
+    identity_renew_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -80,6 +84,10 @@ class Settings:
             token_store_path=os.environ.get("TOKEN_STORE_PATH", "/data/oauth-tokens.json"),
             allow_legacy_api_key=allow_legacy,
             forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "172.20.0.2").strip() or "172.20.0.2",
+            identity_key_file=os.environ.get("IDENTITY_KEY_FILE", "/run/secrets/identity-key").strip(),
+            identity_store_dir=os.environ.get("IDENTITY_STORE_DIR", "/data/identities").strip() or "/data/identities",
+            identity_fallback=_flag("IDENTITY_FALLBACK", True),
+            identity_renew_seconds=int(os.environ.get("IDENTITY_RENEW_SECONDS", "43200") or "43200"),
         )
 
 

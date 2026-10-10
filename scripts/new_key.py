@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import secrets
 import sys
 from datetime import datetime, timezone
+
+_IDENTITY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 def _prefixes(raw: str) -> list[str]:
@@ -44,13 +47,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prefixes", default="", help="Kommaseparerade skrivprefix, till exempel projekt/,familj/")
     parser.add_argument("--read-prefixes", default="", help="Tomt betyder att läsning omfattar hela wikin")
     parser.add_argument("--expires", default=None, help="ISO-tid eller utelämnad")
+    parser.add_argument("--wiki-identity", default="", help="Valfri Wiki.js-identitet, till exempel jonas")
     args = parser.parse_args(argv)
+    wiki_identity = (args.wiki_identity or "").strip()
+    if wiki_identity and not _IDENTITY_NAME.fullmatch(wiki_identity):
+        print("ogiltig wiki-identity", file=sys.stderr)
+        return 2
     prefixes = _prefixes(args.prefixes or "")
     if args.scope == "write" and not prefixes:
         print("scope write kräver minst ett --prefixes", file=sys.stderr)
         return 2
     secret = secrets.token_urlsafe(32)
     entry = build_entry(args, secret)
+    if wiki_identity:
+        entry["wiki_identity"] = wiki_identity
     print("Nyckel (visas bara den här gången):")
     print(secret)
     print()

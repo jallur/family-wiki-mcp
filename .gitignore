@@ -8,3 +8,4 @@ __pycache__/
 keys.json
 data/
 oauth-tokens.json
+identity.key

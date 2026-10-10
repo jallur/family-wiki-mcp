@@ -152,6 +152,10 @@ def make_settings(**overrides) -> Settings:
         token_store_path="",
         allow_legacy_api_key=False,
         forwarded_allow_ips="172.20.0.2",
+        identity_key_file="",
+        identity_store_dir="",
+        identity_fallback=True,
+        identity_renew_seconds=0,
     )
     data.update(overrides)
     return Settings(**data)
