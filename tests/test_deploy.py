@@ -14,7 +14,9 @@ def test_dockerfile_and_compose_match_cloud01():
     assert "KEYS_FILE: /run/secrets/keys/keys.json" in compose
     assert "keys.json:/run/secrets/keys.json" not in compose
     assert "/root/family-wiki-mcp/data:/data" in compose
-    assert 'FORWARDED_ALLOW_IPS: "172.20.0.2"' in compose
+    assert 'FORWARDED_ALLOW_IPS: "172.20.0.2,158.174.102.122"' in compose
+    assert "scripts/revoke_token.py" in deploy
+    assert "Ingen HTTP" in deploy or "ingen HTTP" in deploy
     assert "/root/family-wiki-mcp/keys:/run/secrets/keys:ro" in deploy
     assert "KEYS_FILE: /run/secrets/keys/keys.json" in deploy
     assert "family-wiki-mcp" in deploy

@@ -94,7 +94,7 @@ environment:
   KEYS_FILE: /run/secrets/keys/keys.json
   TOKEN_STORE_PATH: /data/oauth-tokens.json
   ALLOW_LEGACY_API_KEY: "true"
-  FORWARDED_ALLOW_IPS: "172.20.0.2"
+  FORWARDED_ALLOW_IPS: "172.20.0.2,158.174.102.122"
 volumes:
   - /root/wiki/.api-token:/run/secrets/wiki-api-token:ro
   - /root/family-wiki-mcp/keys:/run/secrets/keys:ro
@@ -112,7 +112,7 @@ docker compose ps
 docker compose logs --tail=50 family-wiki-mcp
 ```
 
-Uvicorn startar som en process, utan `--workers`, med `--proxy-headers --forwarded-allow-ips`. Standard är `172.20.0.2` (caddy-proxy). Ändra med `FORWARDED_ALLOW_IPS`. Flera workers skulle få `SIGHUP` att starta om processen i stället för att ladda om nycklarna.
+Uvicorn startar som en process, utan `--workers`, med `--proxy-headers --forwarded-allow-ips`. Compose sätter `172.20.0.2,158.174.102.122`: caddy-proxy och hemmets edge, samma värde som körs live. Utan variabeln faller imagen tillbaka på `172.20.0.2`. Flera workers skulle få `SIGHUP` att starta om processen i stället för att ladda om nycklarna.
 
 Omladdning av `keys/keys.json` sker när mtime ändras, och direkt på `SIGHUP`. Katalogen är monterad, så bytet syns i containern:
 
@@ -134,7 +134,7 @@ cloud01:s Caddy (`/root/proxy/Caddyfile`) ska lita på hemmets IP så att klient
 }
 ```
 
-Minins Caddy är första hoppet och ska inte lita på inkommande `X-Forwarded-For`. uvicorn litar bara på `172.20.0.2`.
+Minins Caddy är första hoppet och ska inte lita på inkommande `X-Forwarded-For`. uvicorn litar på `172.20.0.2` och `158.174.102.122`.
 
 ## 6. Koppla om klienterna
 
@@ -181,7 +181,24 @@ anrop key=<namn> client=<nyckelns namn eller -> tool=<verktyg> path=<sökväg el
 
 Statisk bearer har `client=-`. OAuth har nyckelns namn, till exempel `grok-web`, `bots` eller `jonas`, inte OAuth-`client_id`. Nyckel och token ska aldrig finnas i raden.
 
-## 9. Verifiering
+## 9. Återkalla tokens
+
+Det finns ingen HTTP-endpoint för återkallning. Skriptet `scripts/revoke_token.py` skriver i tokenfilen på värden. Välj ett av `--hash` (sha256 av access-token, inte själva token), `--key` (fältet `key_name`) eller `--client` (fältet `client_id`). Exakt ett av dem.
+
+```bash
+cd /root/family-wiki-mcp
+python3 scripts/revoke_token.py --file /root/family-wiki-mcp/data/oauth-tokens.json --key jonas
+python3 scripts/revoke_token.py --file /root/family-wiki-mcp/data/oauth-tokens.json --client grok-web
+python3 scripts/revoke_token.py --file /root/family-wiki-mcp/data/oauth-tokens.json --hash <64 hextecken>
+```
+
+Exit 0 betyder att minst en token fick `revoked`. Exit 1 betyder att ingen träffades eller att den redan var återkallad. Exit 2 är felaktiga argument. Skriptet skriver inte ut access-token.
+
+Bryggan läser om tokenfilen när mtime ändras, utan omstart och utan `SIGHUP`. En trasig fil loggas och den föregående listan ligger kvar. `data/` är en katalogmount, så bytet syns i containern.
+
+När en nyckel sätts till `disabled` eller tas bort ur `keys.json` återkallas alla dess tokens direkt, i minnet och i filen. De förblir ogiltiga om nyckeln senare aktiveras igen. Rånyckeln fungerar då igen, de gamla OAuth-tokens gör det inte.
+
+## 10. Verifiering
 
 - [ ] Backupen från steg 1 finns och `.env` ligger bara där, inte i git.
 - [ ] `stat -c %a /root/family-wiki-mcp/keys/keys.json` är `600`, och compose monterar katalogen `keys`, inte filen ensam.
@@ -192,7 +209,8 @@ Statisk bearer har `client=-`. OAuth har nyckelns namn, till exempel `grok-web`,
 - [ ] openwebui kan läsa `get_page` men får `write scope required` på `create_page`.
 - [ ] nuria kan läsa. jonas kan skriva under sina prefix.
 - [ ] En OAuth-token för grok-web och en för bots ligger i `data/oauth-tokens.json` som hash. `key_name` och `client_id` i posten är nyckelns namn, även om Grok skickade `client_id=family-wiki-mcp`. Filen är mode 600 och innehåller inte hemligheten.
-- [ ] När jonas sätts till `disabled` och filens mtime ändras (eller `SIGHUP` skickas) slutar både rånyckeln och utfärdade tokens att fungera.
+- [ ] När jonas sätts till `disabled` och filens mtime ändras (eller `SIGHUP` skickas) slutar både rånyckeln och alla utfärdade tokens för den nyckeln att fungera direkt, utan omstart. I `data/oauth-tokens.json` är de `revoked`. En annan nyckels token fungerar kvar.
+- [ ] `scripts/revoke_token.py --hash` eller `--key` mot `data/oauth-tokens.json` gör just den token ogiltig vid nästa anrop, utan omstart och utan någon HTTP-endpoint.
 - [ ] Trasig JSON i en kopia ger en fellogg och den gamla listan fungerar fortfarande. Återställ filen efteråt.
 - [ ] Loggen har `key=`, `client=`, `tool=`, `path=`, `result=` och `ip=` och innehåller inte nyckeln eller token.
 - [ ] Efter Caddy-omladdningen är `ip=` klientens adress, inte bara `158.174.102.122`.

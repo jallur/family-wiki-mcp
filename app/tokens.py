@@ -1,10 +1,17 @@
-"""Beständig lagring av OAuth-access-tokens som sha256."""
+"""Beständig lagring av OAuth-access-tokens som sha256.
+
+Filen läses om när mtime ändras, på samma sätt som keys.json. En trasig
+fil behåller listan som redan ligger i minnet. Det finns ingen HTTP-väg
+för återkallning; den sker via scripts/revoke_token.py eller när en
+nyckel blir disabled.
+"""
 from __future__ import annotations
 
 import json
 import logging
 import os
 import secrets
+import stat
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -56,11 +63,27 @@ class TokenStore:
         self.path = path
         self.tokens: list[TokenRecord] = []
         self._lock = threading.Lock()
+        self._mtime: float | None = None
         self.load()
 
-    def load(self) -> None:
-        if not os.path.exists(self.path):
-            self.tokens = []
+    def maybe_reload(self) -> None:
+        with self._lock:
+            self._reload_locked()
+
+    def load(self, *, force: bool = False) -> None:
+        with self._lock:
+            if force:
+                self._mtime = None
+            self._reload_locked()
+
+    def _reload_locked(self) -> None:
+        try:
+            st = os.stat(self.path)
+        except OSError as exc:
+            if self._mtime is not None:
+                log.error("tokenfilen går inte att läsa (%s), behåller föregående lista", exc)
+            return
+        if self._mtime is not None and st.st_mtime == self._mtime:
             return
         try:
             with open(self.path, encoding="utf-8") as handle:
@@ -68,10 +91,16 @@ class TokenStore:
             raw = data.get("tokens") if isinstance(data, dict) else None
             if not isinstance(raw, list):
                 raise ValueError("tokenfilen saknar tokens-lista")
-            self.tokens = [TokenRecord.from_json(item) for item in raw if isinstance(item, dict)]
+            parsed = [TokenRecord.from_json(item) for item in raw if isinstance(item, dict)]
         except Exception:
-            log.exception("tokenfilen är trasig, behåller tom lista i minnet: %s", self.path)
-            self.tokens = []
+            log.exception("tokenfilen är trasig, behåller föregående lista")
+            self._mtime = st.st_mtime
+            return
+        mode = stat.S_IMODE(st.st_mode)
+        if mode & 0o077:
+            log.warning("tokenfilen har mode %o, ska vara 600: %s", mode, self.path)
+        self.tokens = parsed
+        self._mtime = st.st_mtime
 
     def save(self) -> None:
         directory = os.path.dirname(self.path) or "."
@@ -87,6 +116,7 @@ class TokenStore:
                 os.fsync(handle.fileno())
             os.replace(tmp, self.path)
             os.chmod(self.path, 0o600)
+            self._mtime = os.stat(self.path).st_mtime
         except Exception:
             try:
                 os.unlink(tmp)
@@ -97,6 +127,7 @@ class TokenStore:
     def find(self, digest: str) -> TokenRecord | None:
         found: TokenRecord | None = None
         with self._lock:
+            self._reload_locked()
             for token in self.tokens:
                 if const_eq(digest, token.sha256) and found is None:
                     found = token
@@ -114,15 +145,18 @@ class TokenStore:
             revoked=False,
         )
         with self._lock:
+            self._reload_locked()
             self.tokens.append(record)
             self.save()
         return raw
 
     def revoke_hash(self, digest: str) -> bool:
+        needle = digest.strip().lower()
         changed = False
         with self._lock:
+            self._reload_locked()
             for token in self.tokens:
-                if const_eq(digest, token.sha256) and not token.revoked:
+                if const_eq(needle, token.sha256) and not token.revoked:
                     token.revoked = True
                     changed = True
             if changed:
@@ -130,10 +164,17 @@ class TokenStore:
         return changed
 
     def revoke_key(self, key_name: str) -> int:
+        return self._revoke_where("key_name", key_name)
+
+    def revoke_client(self, client_id: str) -> int:
+        return self._revoke_where("client_id", client_id)
+
+    def _revoke_where(self, field: str, value: str) -> int:
         count = 0
         with self._lock:
+            self._reload_locked()
             for token in self.tokens:
-                if token.key_name == key_name and not token.revoked:
+                if getattr(token, field) == value and not token.revoked:
                     token.revoked = True
                     count += 1
             if count:

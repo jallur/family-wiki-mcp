@@ -186,7 +186,11 @@ class KeyStore:
         current_names = {key.name for key in current}
         for key in current:
             if key.disabled:
-                store.revoke_key(key.name)
+                count = store.revoke_key(key.name)
+                if count:
+                    log.info("nyckel disabled, återkallade %s tokens key=%s", count, key.name)
         for key in previous:
             if key.name not in current_names:
-                store.revoke_key(key.name)
+                count = store.revoke_key(key.name)
+                if count:
+                    log.info("nyckel borttagen, återkallade %s tokens key=%s", count, key.name)

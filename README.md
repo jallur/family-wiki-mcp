@@ -45,7 +45,7 @@ Klientnamnet i loggen och i tokenposten är namnet på nyckeln som klistrades in
 
 OpenWebUI använder statisk `Authorization: Bearer` eller `X-API-Key` med nyckeln `openwebui`, inte OAuth.
 
-Återkallning gäller per token. När nyckeln sätts till `disabled` (eller tas bort) återkallas alla tokens som är kopplade till namnet. En avstängd nyckel går inte att använda som bearer heller.
+Återkallning gäller per token, via `scripts/revoke_token.py` (`--hash`, `--key` eller `--client`) mot tokenfilen. Det finns ingen HTTP-endpoint. Filen läses om när mtime ändras, utan omstart. När nyckeln sätts till `disabled` (eller tas bort) blir alla dess tokens ogiltiga direkt och ligger kvar som återkallade om nyckeln slås på igen. En avstängd nyckel går inte att använda som bearer heller.
 
 ## Författare
 
@@ -71,7 +71,7 @@ anrop key=grok-web client=grok-web tool=get_page path=projekt/a result=ok ip=203
 
 Nyckel och token loggas inte. Statisk bearer har `client=-`. OAuth har nyckelns namn som `client`, till exempel `grok-web`, `bots` eller `jonas`.
 
-Käll-IP kommer från uvicorn `--proxy-headers --forwarded-allow-ips`. Standard är `172.20.0.2` (cloud01:s caddy-proxy) och styrs med `FORWARDED_ALLOW_IPS`. cloud01:s Caddy behöver `trusted_proxies static 158.174.102.122/32`, se DEPLOY.md.
+Käll-IP kommer från uvicorn `--proxy-headers --forwarded-allow-ips`. Compose sätter `172.20.0.2,158.174.102.122` (caddy-proxy och hemmets edge). cloud01:s Caddy behöver `trusted_proxies static 158.174.102.122/32`, se DEPLOY.md.
 
 ## Legacy
 
@@ -79,7 +79,7 @@ Käll-IP kommer från uvicorn `--proxy-headers --forwarded-allow-ips`. Standard 
 
 ## Omladdning
 
-`keys/keys.json` läses om när filens mtime ändras, och direkt på `SIGHUP`. Katalogen monteras, inte filen ensam, så att ett atomiskt `mv` syns i containern. Om JSON är trasig behålls den gamla listan och ett fel loggas.
+`keys/keys.json` läses om när filens mtime ändras, och direkt på `SIGHUP`. Katalogen monteras, inte filen ensam, så att ett atomiskt `mv` syns i containern. Om JSON är trasig behålls den gamla listan och ett fel loggas. OAuth-tokenfilen läses om på samma sätt när dess mtime ändras. `SIGHUP` behövs inte för den.
 
 ## Tester
 
