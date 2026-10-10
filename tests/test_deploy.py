@@ -10,9 +10,14 @@ def test_dockerfile_and_compose_match_cloud01():
     assert "--proxy-headers" in dockerfile
     assert "--forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-172.20.0.2}" in dockerfile
     assert "FORWARDED_ALLOW_IPS=172.20.0.2" in dockerfile
-    assert "/root/family-wiki-mcp/keys.json:/run/secrets/keys.json:ro" in compose
+    assert "/root/family-wiki-mcp/keys:/run/secrets/keys:ro" in compose
+    assert "KEYS_FILE: /run/secrets/keys/keys.json" in compose
+    assert "keys.json:/run/secrets/keys.json" not in compose
     assert "/root/family-wiki-mcp/data:/data" in compose
     assert 'FORWARDED_ALLOW_IPS: "172.20.0.2"' in compose
+    assert "/root/family-wiki-mcp/keys:/run/secrets/keys:ro" in deploy
+    assert "KEYS_FILE: /run/secrets/keys/keys.json" in deploy
+    assert "family-wiki-mcp" in deploy
     assert "trusted_proxies static 158.174.102.122/32" in deploy
     assert "grok-web" in deploy and "openwebui" in deploy and "nuria" in deploy
     assert "comments.create.content" in Path("NOTES.md").read_text(encoding="utf-8")

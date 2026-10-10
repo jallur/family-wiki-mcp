@@ -76,7 +76,7 @@ class Settings:
             port=int(os.environ.get("PORT", "8080")),
             public_host=os.environ.get("PUBLIC_HOST", "mcp.wiki.aldenback.com"),
             allowed_origins=tuple(origins),
-            keys_file=os.environ.get("KEYS_FILE", "/run/secrets/keys.json"),
+            keys_file=os.environ.get("KEYS_FILE", "/run/secrets/keys/keys.json"),
             token_store_path=os.environ.get("TOKEN_STORE_PATH", "/data/oauth-tokens.json"),
             allow_legacy_api_key=allow_legacy,
             forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "172.20.0.2").strip() or "172.20.0.2",

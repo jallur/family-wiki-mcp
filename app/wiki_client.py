@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
+
+log = logging.getLogger("wiki-mcp")
 
 
 # Wiki.js 2.5.315: pages.create och pages.update har inget fält för författare
@@ -34,17 +37,41 @@ class WikiClient:
     def close(self) -> None:
         self._client.close()
 
-    def gql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _post(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"query": query}
         if variables is not None:
             payload["variables"] = variables
-        r = self._client.post(self.url, json=payload)
-        if r.status_code >= 400:
-            raise WikiError(f"Wiki HTTP {r.status_code}", r.text)
-        data = r.json()
-        if data.get("errors"):
-            raise WikiError("Wiki GraphQL error", data["errors"])
-        return data.get("data") or {}
+        response = self._client.post(self.url, json=payload)
+        if response.status_code >= 400:
+            raise WikiError(f"Wiki HTTP {response.status_code}", response.text)
+        body = response.json()
+        if not isinstance(body, dict):
+            raise WikiError("Wiki JSON-svar är ogiltigt", body)
+        return body
+
+    def gql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = self._post(query, variables)
+        if body.get("errors"):
+            raise WikiError("Wiki GraphQL error", body["errors"])
+        return body.get("data") or {}
+
+    def id_by_path(self, path: str, locale: str | None = None) -> int | None:
+        """Hämta bara sid-id. Urvalet har inga fält som Wiki.js kan lämna null."""
+        loc = locale or self.locale
+        body = self._post(
+            """
+            query($p: String!, $l: String!) {
+              pages {
+                singleByPath(path: $p, locale: $l) { id }
+              }
+            }
+            """,
+            {"p": path.lstrip("/"), "l": loc},
+        )
+        page = ((body.get("data") or {}).get("pages") or {}).get("singleByPath") or {}
+        if isinstance(page, dict) and page.get("id"):
+            return int(page["id"])
+        return None
 
     def list_pages(self, limit: int = 200) -> list[dict[str, Any]]:
         data = self.gql(
@@ -127,8 +154,16 @@ class WikiClient:
             return result
         try:
             response = self.add_change_comment(int(page_id), change_comment)
-        except WikiError as exc:
-            result["change_comment_error"] = str(exc)
+        except Exception as exc:
+            message = _comment_error_text(exc)
+            log.warning("ändringskommentar misslyckades page_id=%s error=%s", page_id, message)
+            result["change_comment_error"] = message
+            return result
+        inner = response.get("responseResult") if isinstance(response, dict) else None
+        if isinstance(inner, dict) and inner.get("succeeded") is False:
+            message = str(inner.get("message") or "ändringskommentar avböjdes")
+            log.warning("ändringskommentar misslyckades page_id=%s error=%s", page_id, message)
+            result["change_comment_error"] = message
             return result
         result["change_comment"] = {
             "field": CHANGE_COMMENT_GRAPHQL_FIELD,
@@ -148,7 +183,7 @@ class WikiClient:
         change_comment: str | None = None,
     ) -> dict[str, Any]:
         loc = locale or self.locale
-        data = self.gql(
+        body = self._post(
             """
             mutation(
               $path: String!, $title: String!, $content: String!,
@@ -167,7 +202,7 @@ class WikiClient:
                   title: $title
                 ) {
                   responseResult { succeeded message errorCode }
-                  page { id path title locale updatedAt }
+                  page { id }
                 }
               }
             }
@@ -182,8 +217,8 @@ class WikiClient:
                 "editor": self.editor,
             },
         )
-        result = (data.get("pages") or {}).get("create") or {}
-        return self._with_change_comment(result, change_comment)
+        result, page_id = self._written_page(body, "create", path, loc)
+        return self._with_change_comment(result, change_comment, page_id=page_id)
 
     def update_page(
         self,
@@ -210,7 +245,7 @@ class WikiClient:
         if not isinstance(tags, list):
             raise WikiError("tags must be a list of strings")
 
-        data = self.gql(
+        body = self._post(
             """
             mutation(
               $id: Int!, $path: String!, $title: String!, $description: String!,
@@ -230,7 +265,7 @@ class WikiClient:
                   tags: $tags
                 ) {
                   responseResult { succeeded message errorCode }
-                  page { id path title locale updatedAt }
+                  page { id }
                 }
               }
             }
@@ -246,7 +281,67 @@ class WikiClient:
                 "editor": self.editor,
             },
         )
-        result = (data.get("pages") or {}).get("update") or {}
+        result, page_id = self._written_page(body, "update", path, loc, known_id=page.get("id"))
         result["_previous_tags"] = existing_tags
-        page_id = (result.get("page") or {}).get("id") or page.get("id")
         return self._with_change_comment(result, change_comment, page_id=page_id)
+
+    def _written_page(
+        self,
+        body: dict[str, Any],
+        operation: str,
+        path: str,
+        locale: str,
+        known_id: int | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        """Tolka mutationssvaret. Null i urvalet får inte dölja en lyckad skrivning."""
+        errors = body.get("errors") or []
+        node = ((body.get("data") or {}).get("pages") or {}).get(operation) or {}
+        if not isinstance(node, dict):
+            node = {}
+        response = node.get("responseResult")
+        if isinstance(response, dict) and response.get("succeeded") is False:
+            raise WikiError(str(response.get("message") or "Wiki avböjde skrivningen"), response)
+        if errors and not _only_null_selection_errors(errors):
+            raise WikiError("Wiki GraphQL error", errors)
+        page_id = _page_id(node) or (int(known_id) if known_id else None)
+        if page_id is None:
+            page_id = self.id_by_path(path, locale)
+        if page_id is None:
+            raise WikiError("Wiki GraphQL error", errors or "sid-id saknas")
+        result = dict(node)
+        if not isinstance(response, dict):
+            result["responseResult"] = {"succeeded": True, "message": "ok", "errorCode": 0}
+        page = result.get("page") if isinstance(result.get("page"), dict) else {}
+        if not page.get("id"):
+            result["page"] = {"id": page_id}
+        return result, page_id
+
+
+def _comment_error_text(exc: Exception) -> str:
+    details = getattr(exc, "details", None)
+    if isinstance(details, list):
+        parts = [
+            str(err["message"])
+            for err in details
+            if isinstance(err, dict) and err.get("message")
+        ]
+        if parts:
+            return "; ".join(parts)
+    return str(exc)
+
+
+def _only_null_selection_errors(errors: Any) -> bool:
+    if not isinstance(errors, list) or not errors:
+        return False
+    for err in errors:
+        message = err.get("message") if isinstance(err, dict) else str(err)
+        if "Cannot return null for non-nullable field" not in str(message):
+            return False
+    return True
+
+
+def _page_id(node: dict[str, Any]) -> int | None:
+    page = node.get("page")
+    if isinstance(page, dict) and page.get("id"):
+        return int(page["id"])
+    return None
