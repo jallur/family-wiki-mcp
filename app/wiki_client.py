@@ -5,6 +5,12 @@ from typing import Any
 import httpx
 
 
+# Wiki.js 2.5.315: pages.create och pages.update har inget fält för författare
+# eller ändringskommentar. description är sidans sammanfattning. Ändringskommentaren
+# skrivs i comments.create.content och sidans content lämnas oförändrat.
+CHANGE_COMMENT_GRAPHQL_FIELD = "comments.create.content"
+
+
 class WikiError(Exception):
     def __init__(self, message: str, details: Any = None):
         super().__init__(message)
@@ -88,6 +94,49 @@ class WikiClient:
         )
         return (data.get("pages") or {}).get("singleByPath")
 
+    def add_change_comment(self, page_id: int, content: str) -> dict[str, Any]:
+        """Skriv ändringskommentar i comments.create.content. Rör inte sidans content."""
+        data = self.gql(
+            """
+            mutation($pageId: Int!, $content: String!) {
+              comments {
+                create(pageId: $pageId, content: $content) {
+                  responseResult { succeeded message errorCode }
+                  id
+                }
+              }
+            }
+            """,
+            {"pageId": page_id, "content": content},
+        )
+        return (data.get("comments") or {}).get("create") or {}
+
+    def _with_change_comment(
+        self,
+        result: dict[str, Any],
+        change_comment: str | None,
+        page_id: int | None = None,
+    ) -> dict[str, Any]:
+        if not change_comment:
+            return result
+        result = dict(result)
+        if page_id is None:
+            page_id = (result.get("page") or {}).get("id")
+        if not page_id:
+            result["change_comment_error"] = "sid-id saknas, ändringskommentar skrevs inte"
+            return result
+        try:
+            response = self.add_change_comment(int(page_id), change_comment)
+        except WikiError as exc:
+            result["change_comment_error"] = str(exc)
+            return result
+        result["change_comment"] = {
+            "field": CHANGE_COMMENT_GRAPHQL_FIELD,
+            "content": change_comment,
+            "response": response,
+        }
+        return result
+
     def create_page(
         self,
         path: str,
@@ -96,6 +145,7 @@ class WikiClient:
         description: str | None = None,
         tags: list[str] | None = None,
         locale: str | None = None,
+        change_comment: str | None = None,
     ) -> dict[str, Any]:
         loc = locale or self.locale
         data = self.gql(
@@ -132,7 +182,8 @@ class WikiClient:
                 "editor": self.editor,
             },
         )
-        return (data.get("pages") or {}).get("create") or {}
+        result = (data.get("pages") or {}).get("create") or {}
+        return self._with_change_comment(result, change_comment)
 
     def update_page(
         self,
@@ -142,6 +193,7 @@ class WikiClient:
         description: str | None = None,
         tags: list[str] | None = None,
         locale: str | None = None,
+        change_comment: str | None = None,
     ) -> dict[str, Any]:
         loc = locale or self.locale
         page = self.get_by_path(path, loc)
@@ -196,4 +248,5 @@ class WikiClient:
         )
         result = (data.get("pages") or {}).get("update") or {}
         result["_previous_tags"] = existing_tags
-        return result
+        page_id = (result.get("page") or {}).get("id") or page.get("id")
+        return self._with_change_comment(result, change_comment, page_id=page_id)

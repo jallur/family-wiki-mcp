@@ -1,0 +1,57 @@
+[
+  {
+    "name": "grok-web",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "scope": "write",
+    "prefixes": ["projekt/", "familj/", "studier/", "handbok/"],
+    "read_prefixes": [],
+    "expires": null,
+    "disabled": true,
+    "created": "2026-10-10T00:00:00Z",
+    "author": "Grok"
+  },
+  {
+    "name": "bots",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+    "scope": "write",
+    "prefixes": ["projekt/", "familj/", "studier/", "handbok/"],
+    "read_prefixes": [],
+    "expires": null,
+    "disabled": true,
+    "created": "2026-10-10T00:00:00Z",
+    "author": "Bots"
+  },
+  {
+    "name": "openwebui",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+    "scope": "read",
+    "prefixes": [],
+    "read_prefixes": [],
+    "expires": null,
+    "disabled": true,
+    "created": "2026-10-10T00:00:00Z",
+    "author": "OpenWebUI"
+  },
+  {
+    "name": "jonas",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+    "scope": "write",
+    "prefixes": ["projekt/", "familj/", "studier/", "handbok/"],
+    "read_prefixes": [],
+    "expires": null,
+    "disabled": true,
+    "created": "2026-10-10T00:00:00Z",
+    "author": "Jonas"
+  },
+  {
+    "name": "nuria",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000004",
+    "scope": "read",
+    "prefixes": [],
+    "read_prefixes": [],
+    "expires": null,
+    "disabled": true,
+    "created": "2026-10-10T00:00:00Z",
+    "author": "Nuria"
+  }
+]

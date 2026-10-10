@@ -1,47 +1,86 @@
-# Family Wiki MCP Bridge (Streamable HTTP)
+# Family Wiki MCP
 
-Custom Python MCP bridge so Grok.com connectors can read/write the family Wiki.js
-without ever receiving the Wiki GraphQL token.
+HTTPS-brygga så att Grok, bots och OpenWebUI kan läsa och skriva familjens Wiki.js utan att få Wiki.js-token.
 
-## Live endpoints (HTTPS)
+Drift på cloud01: [DEPLOY.md](DEPLOY.md). Bakgrund om Wiki.js 2.5 och proxykedjan: [NOTES.md](NOTES.md).
 
-- MCP (use this in Grok): https://wiki.aldenback.com/mcp-api/mcp
-- Health: https://wiki.aldenback.com/mcp-api/health
-- Preferred subdomain (DNS pending): https://mcp.wiki.aldenback.com/mcp
+## Ändpunkter
 
-## Auth
+- MCP: `https://wiki.aldenback.com/mcp`
+- Hälsa (utan nyckel): `https://wiki.aldenback.com/health`
+- OAuth: `https://wiki.aldenback.com/oauth/authorize` och `/oauth/token`
+- Metadata: `/.well-known/oauth-authorization-server` och `/.well-known/oauth-protected-resource`
 
-- Header: `Authorization: Bearer <MCP_API_KEY>`
-- Also accepted: `X-API-Key: <MCP_API_KEY>`
-- Key file (mode 600): `/root/family-wiki-mcp/.env` and `/root/family-wiki-mcp/.mcp-api-key`
-- Wiki token stays on cloud01 via bind-mount `/root/wiki/.api-token` (never in the report / never sent to Grok)
+## Nycklar
 
-## Write policy (v1)
+`keys.json` har mode 600 och monteras read-only. Varje post har:
 
-- Allowed path prefixes only: `projekt/`, `familj/`, `studier/`
-- No delete tools
-- Locale default: `sv`, editor: `markdown`
-- `update_page` requires `tags` (preserve from `get_page`)
+| fält | betydelse |
+| --- | --- |
+| `name` | Namn i logg och ändringskommentar |
+| `sha256` | Hex-hash av hemligheten. Själva nyckeln lagras inte |
+| `scope` | `read` eller `write` |
+| `prefixes` | Sökvägar för `create_page` och `update_page` |
+| `read_prefixes` | Filter för `get_page`, `search_pages` och `list_pages`. Tom lista betyder hela wikin |
+| `expires` | ISO-tid eller `null` |
+| `disabled` | `true` stänger nyckeln och återkallar dess OAuth-tokens |
+| `created` | ISO-tid |
+| `author` | Text i ändringskommentaren. Tomt fält faller tillbaka på `name` |
 
-## Deploy paths
+`create_page` och `update_page` kräver `write` och att sökvägen träffar nyckelns `prefixes` och serverns allowlist. Det finns inget raderingsverktyg.
 
-- Code/compose: `/root/family-wiki-mcp/`
-- Container: `family-wiki-mcp` on docker network `proxy`
-- Caddy: `/root/proxy/Caddyfile` (`handle_path /mcp-api/*` + future `mcp.wiki.aldenback.com`)
+Skriptet `scripts/new_key.py` skriver ut hemligheten en gång och en JSON-post. Exempelfilen `keys.example.json` är avstängd och ska inte monteras.
 
-## Grok custom connector
+## OAuth
 
-1. https://grok.com/connectors → New → Custom
-2. URL: `https://wiki.aldenback.com/mcp-api/mcp`
-3. Auth: Bearer token = value of `MCP_API_KEY` from `/root/family-wiki-mcp/.env`
+PKCE (S256). Formuläret tar emot en namngiven nyckel och ger ut en egen opak access token. Token lagras bara som sha256, kopplad till nyckelns namn, i volymen `TOKEN_STORE_PATH` (standard `/data/oauth-tokens.json`).
 
-## DNS needed (Jonas/CoreIT)
+Ett `client_id` per klient:
 
-Create Cloudflare A record (DNS-only / grey cloud OK for Caddy ACME):
+- `grok-web` — redirect-värd `grok.com`
+- `bots` — redirect-värd `x.ai` eller `grok.com`
 
-- Name: `mcp.wiki`
-- Type: A
-- Value: `157.180.42.121`
-- Proxy: DNS only (grey) recommended so Caddy can issue the cert
+OpenWebUI använder statisk `Authorization: Bearer` eller `X-API-Key` med nyckeln `openwebui`, inte OAuth.
 
-Until then use the `/mcp-api` path under `wiki.aldenback.com`.
+Återkallning gäller per token. När nyckeln sätts till `disabled` (eller tas bort) återkallas alla tokens som är kopplade till namnet. En avstängd nyckel går inte att använda som bearer heller.
+
+## Författare
+
+Wiki.js 2.5.315 kör alla anrop med API-nyckel som användare 1. Mutationerna `pages.create` och `pages.update` har inget fält för författare, och inte heller för en ändringskommentar. `description` är sidans sammanfattning och lämnas som anroparen skickade den. `content` ändras inte.
+
+Det fält GraphQL stöder för en ändringskommentar är `comments.create.content`. Efter lyckad create och update skriver bryggan en sidkommentar:
+
+```text
+MCP: sidan skapades av Jonas (nyckel grok-web).
+```
+
+`author` används om det är satt, annars `name`.
+
+## Logg och klient-IP
+
+En rad per anrop:
+
+```text
+anrop key=grok-web client=grok-web tool=get_page path=projekt/a result=ok ip=203.0.113.5
+```
+
+Nyckel och token loggas inte. Statisk bearer har `client=-`.
+
+Käll-IP kommer från uvicorn `--proxy-headers --forwarded-allow-ips`. Standard är `172.20.0.2` (cloud01:s caddy-proxy) och styrs med `FORWARDED_ALLOW_IPS`. cloud01:s Caddy behöver `trusted_proxies static 158.174.102.122/32`, se DEPLOY.md.
+
+## Legacy
+
+`MCP_API_KEY` godtas med full skrivrätt inom serverns prefix om `ALLOW_LEGACY_API_KEY` inte är `false`. Varje träff loggas som varning, utan nyckelvärdet. Nyckeln syns som `key=legacy`.
+
+## Omladdning
+
+`keys.json` läses om när filens mtime ändras, och direkt på `SIGHUP`. Om JSON är trasig behålls den gamla listan och ett fel loggas.
+
+## Tester
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest
+```
+
+Wiki.js är mockad. Testerna täcker scope, prefix, läsfilter, utgång, disabled, återkallning, omladdning, trasig JSON, legacy, OAuth per klient, författare i ändringskommentaren och att nyckeln inte loggas.

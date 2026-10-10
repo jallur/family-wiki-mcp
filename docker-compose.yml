@@ -16,8 +16,14 @@ services:
       WIKI_LOCALE: sv
       WIKI_EDITOR: markdown
       ALLOWED_PREFIXES: "projekt/,familj/,studier/,handbok/"
+      KEYS_FILE: /run/secrets/keys.json
+      TOKEN_STORE_PATH: /data/oauth-tokens.json
+      ALLOW_LEGACY_API_KEY: "true"
+      FORWARDED_ALLOW_IPS: "172.20.0.2"
     volumes:
       - /root/wiki/.api-token:/run/secrets/wiki-api-token:ro
+      - /root/family-wiki-mcp/keys.json:/run/secrets/keys.json:ro
+      - /root/family-wiki-mcp/data:/data
     expose:
       - "8080"
     networks:
