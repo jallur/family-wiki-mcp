@@ -13,7 +13,7 @@ Drift på cloud01: [DEPLOY.md](DEPLOY.md). Bakgrund om Wiki.js 2.5 och proxykedj
 
 ## Nycklar
 
-`keys.json` har mode 600 och monteras read-only. Varje post har:
+`keys/keys.json` har mode 600. Katalogen monteras read-only, så att ett atomiskt `mv` syns i containern. Varje post har:
 
 | fält | betydelse |
 | --- | --- |
@@ -35,10 +35,13 @@ Skriptet `scripts/new_key.py` skriver ut hemligheten en gång och en JSON-post. 
 
 PKCE (S256). Formuläret tar emot en namngiven nyckel och ger ut en egen opak access token. Token lagras bara som sha256, kopplad till nyckelns namn, i volymen `TOKEN_STORE_PATH` (standard `/data/oauth-tokens.json`).
 
-Ett `client_id` per klient:
+Tillåtna `client_id`:
 
-- `grok-web` — redirect-värd `grok.com`
+- `grok-web` — redirect-värd `grok.com` (även underdomäner, till exempel `www.grok.com`)
 - `bots` — redirect-värd `x.ai` eller `grok.com`
+- `family-wiki-mcp` — alias som Grok web skickar. Samma redirect-värdar som redan används: `grok.com` (Grok, sökväg `/connectors-oauth-exchange-code`) och `x.ai` (bots)
+
+Klientnamnet i loggen och i tokenposten är namnet på nyckeln som klistrades in i formuläret. Då går grok-web, bots och jonas att skilja åt även när `client_id` är `family-wiki-mcp`.
 
 OpenWebUI använder statisk `Authorization: Bearer` eller `X-API-Key` med nyckeln `openwebui`, inte OAuth.
 
@@ -48,7 +51,9 @@ OpenWebUI använder statisk `Authorization: Bearer` eller `X-API-Key` med nyckel
 
 Wiki.js 2.5.315 kör alla anrop med API-nyckel som användare 1. Mutationerna `pages.create` och `pages.update` har inget fält för författare, och inte heller för en ändringskommentar. `description` är sidans sammanfattning och lämnas som anroparen skickade den. `content` ändras inte.
 
-Det fält GraphQL stöder för en ändringskommentar är `comments.create.content`. Efter lyckad create och update skriver bryggan en sidkommentar:
+Det fält GraphQL stöder för en ändringskommentar är `comments.create.content`. Mutationssvaret ber bara om `page { id }`. `locale` och `updatedAt` kan vara null i Wiki.js trots att schemat säger att de är obligatoriska, och då avbryts hela svaret innan kommentaren hinner skrivas. Saknas id hämtas det med `singleByPath` och urvalet `{ id }`. Misslyckas själva kommentaren syns det som `change_comment_error`. Sidskrivningen räknas ändå som lyckad.
+
+Efter lyckad create och update skriver bryggan en sidkommentar:
 
 ```text
 MCP: sidan skapades av Jonas (nyckel grok-web).
@@ -64,7 +69,7 @@ En rad per anrop:
 anrop key=grok-web client=grok-web tool=get_page path=projekt/a result=ok ip=203.0.113.5
 ```
 
-Nyckel och token loggas inte. Statisk bearer har `client=-`.
+Nyckel och token loggas inte. Statisk bearer har `client=-`. OAuth har nyckelns namn som `client`, till exempel `grok-web`, `bots` eller `jonas`.
 
 Käll-IP kommer från uvicorn `--proxy-headers --forwarded-allow-ips`. Standard är `172.20.0.2` (cloud01:s caddy-proxy) och styrs med `FORWARDED_ALLOW_IPS`. cloud01:s Caddy behöver `trusted_proxies static 158.174.102.122/32`, se DEPLOY.md.
 
@@ -74,7 +79,7 @@ Käll-IP kommer från uvicorn `--proxy-headers --forwarded-allow-ips`. Standard 
 
 ## Omladdning
 
-`keys.json` läses om när filens mtime ändras, och direkt på `SIGHUP`. Om JSON är trasig behålls den gamla listan och ett fel loggas.
+`keys/keys.json` läses om när filens mtime ändras, och direkt på `SIGHUP`. Katalogen monteras, inte filen ensam, så att ett atomiskt `mv` syns i containern. Om JSON är trasig behålls den gamla listan och ett fel loggas.
 
 ## Tester
 

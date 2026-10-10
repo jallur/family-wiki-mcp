@@ -19,10 +19,14 @@ from .tokens import TokenStore
 
 log = logging.getLogger("wiki-mcp")
 
-# Ett client_id per klient. Redirect-värdar är suffix (grok.com matchar www.grok.com).
+# Redirect-värd matchas som suffix (grok.com täcker www.grok.com).
+# Grok web skickar client_id=family-wiki-mcp. Det är ett alias för samma
+# redirect-värdar som bryggan redan godtar: grok.com (Grok, path
+# /connectors-oauth-exchange-code) och x.ai (bots).
 OAUTH_CLIENTS: dict[str, tuple[str, ...]] = {
     "grok-web": ("grok.com",),
     "bots": ("x.ai", "grok.com"),
+    "family-wiki-mcp": ("grok.com", "x.ai"),
 }
 
 WWW_AUTHENTICATE = (
@@ -185,8 +189,9 @@ def make_oauth_routes(key_store: KeyStore, token_store: TokenStore):
         key = key_store.by_name(rec.key_name)
         if key is None or not key.active:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        access = token_store.issue(key_name=key.name, client_id=rec.client_id)
-        log.info("oauth token utfärdad key=%s client=%s", key.name, rec.client_id)
+        # Klientnamnet i logg och token är nyckeln som klistrades in, inte OAuth-client_id.
+        access = token_store.issue(key_name=key.name, client_id=key.name)
+        log.info("oauth token utfärdad key=%s client=%s", key.name, key.name)
         return JSONResponse(
             {
                 "access_token": access,

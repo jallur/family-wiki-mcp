@@ -32,7 +32,7 @@
 
 Wiki.js 2.5.315 sätter `authorId` och `creatorId` till den inloggade användaren. API-nyckeln är användare 1, och `pages.create` / `pages.update` saknar argument för författare. Schemat har `content`, `description`, `editor`, `isPublished`, `isPrivate`, `locale`, `path`, `publishStartDate`, `publishEndDate`, `scriptCss`, `scriptJs`, `tags` och `title`. Inget av dem är en ändringskommentar. `description` är sidans sammanfattning och ska vara den text anroparen skickade. `content` får inte ändras för att smyga in ett namn.
 
-Det fält som GraphQL stöder för en ändringskommentar är `comments.create.content` (behörighet `write:comments` eller `manage:system`, vilket användare 1 har). Bryggan anropar det efter lyckad create och update:
+Det fält som GraphQL stöder för en ändringskommentar är `comments.create.content` (behörighet `write:comments` eller `manage:system`, vilket användare 1 har). Mutationssvaret ber bara om `page { id }`. `locale` kan vara null i svaret även när skrivningen lyckades, och GraphQL svarar då `Cannot return null for non-nullable field Page.locale` och nollar `page`. Saknas id hämtas det via `singleByPath` med urvalet `{ id }`. Bryggan anropar kommentaren efter lyckad create och update. Ett fel i kommentaren gör inte att create eller update ser ut att ha misslyckats:
 
 ```text
 MCP: sidan skapades av <author eller name> (nyckel <name>).
@@ -45,4 +45,5 @@ Kommentaren är synlig på sidan. Den ingår inte i markdown-innehållet. Missly
 
 - `www-authenticate` är `Bearer resource_metadata="…"`.
 - Läsning filtreras med `read_prefixes`. Tom lista betyder hela wikin. Skrivning kräver `write` och nyckelns `prefixes`.
-- OAuth ger ut en opak token per inloggning, hashad och kopplad till nyckelns namn. `client_id` är `grok-web` eller `bots`. OpenWebUI använder statisk bearer.
+- OAuth ger ut en opak token per inloggning, hashad och kopplad till nyckelns namn. Tillåtna OAuth-`client_id` är `grok-web`, `bots` och aliaset `family-wiki-mcp` (redirect-suffix `grok.com` och `x.ai`, samma mönster som de andra: värd eller underdomän, bara https). Namnet i loggen och i tokenposten är nyckeln som klistrades in. OpenWebUI använder statisk bearer.
+- `keys.json` ligger i katalogen `keys/` och den katalogen monteras read-only. Omladdning på mtime och `SIGHUP` är kvar. En ensam fil-mount döljer atomiskt `mv`.
