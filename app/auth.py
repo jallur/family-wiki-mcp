@@ -73,6 +73,7 @@ def resolve_credential(
 ) -> RequestAuth | None:
     """Matcha Bearer/X-API-Key. Jämför sha256 med compare_digest. Loggar aldrig secret."""
     key_store.maybe_reload()
+    token_store.maybe_reload()
     digest = sha256_hex(secret)
 
     token = token_store.find(digest)

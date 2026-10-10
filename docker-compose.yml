@@ -19,7 +19,7 @@ services:
       KEYS_FILE: /run/secrets/keys/keys.json
       TOKEN_STORE_PATH: /data/oauth-tokens.json
       ALLOW_LEGACY_API_KEY: "true"
-      FORWARDED_ALLOW_IPS: "172.20.0.2"
+      FORWARDED_ALLOW_IPS: "172.20.0.2,158.174.102.122"
     volumes:
       - /root/wiki/.api-token:/run/secrets/wiki-api-token:ro
       - /root/family-wiki-mcp/keys:/run/secrets/keys:ro
