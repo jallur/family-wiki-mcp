@@ -1,45 +1,56 @@
-"""Minimal OAuth 2.1 + PKCE for Grok custom MCP connectors."""
+"""OAuth 2.1 + PKCE. Formuläret tar en namngiven nyckel och ger ut en opak token."""
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
+import html
+import logging
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Dict
-from urllib.parse import urlencode, parse_qs, urlparse, urlunparse, parse_qsl
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from .digest import sha256_hex
+from .keys import KeyRecord, KeyStore
+from .tokens import TokenStore
+
+log = logging.getLogger("wiki-mcp")
+
+# Ett client_id per klient. Redirect-värdar är suffix (grok.com matchar www.grok.com).
+OAUTH_CLIENTS: dict[str, tuple[str, ...]] = {
+    "grok-web": ("grok.com",),
+    "bots": ("x.ai", "grok.com"),
+}
+
+WWW_AUTHENTICATE = (
+    'Bearer resource_metadata="https://wiki.aldenback.com/.well-known/oauth-protected-resource'
+    '?resource=https://wiki.aldenback.com/mcp"'
+)
+
 
 @dataclass
 class AuthCode:
-    api_key_ok: bool
+    key_name: str
     redirect_uri: str
-    code_challenge: str | None
-    code_challenge_method: str | None
+    code_challenge: str
+    code_challenge_method: str
     client_id: str
     expires_at: float
     scope: str
 
 
-_codes: Dict[str, AuthCode] = {}
-CLIENT_ID = "family-wiki-mcp"
 
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
-def _verify_pkce(verifier: str, challenge: str, method: str | None) -> bool:
-    method = (method or "S256").upper()
-    if method == "S256":
-        digest = hashlib.sha256(verifier.encode("ascii")).digest()
-        return secrets.compare_digest(_b64url(digest), challenge)
-    if method == "PLAIN":
-        return secrets.compare_digest(verifier, challenge)
-    return False
+def _verify_pkce(verifier: str, challenge: str) -> bool:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return secrets.compare_digest(_b64url(digest), challenge)
 
 
 def oauth_metadata(issuer: str) -> dict:
@@ -65,60 +76,81 @@ def protected_resource_metadata(resource: str, issuer: str) -> dict:
     }
 
 
-def make_oauth_routes(api_key: str, public_base: str):
-    """public_base e.g. https://wiki.aldenback.com/mcp-auth — issuer base without trailing slash."""
+def _redirect_allowed(client_id: str, redirect_uri: str) -> bool:
+    suffixes = OAUTH_CLIENTS.get(client_id)
+    if not suffixes:
+        return False
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    return any(host == suffix or host.endswith("." + suffix) for suffix in suffixes)
 
-    async def well_known_as(_: Request) -> Response:
-        return JSONResponse(oauth_metadata(public_base))
 
-    async def well_known_prm(_: Request) -> Response:
-        # Resource is the MCP endpoint
-        resource = public_base.replace("/mcp-auth", "/mcp") if public_base.endswith("/mcp-auth") else f"{public_base}/mcp"
-        if public_base.endswith("/mcp"):
-            resource = public_base
-            issuer = public_base  # same host paths
-        else:
-            issuer = public_base
-        # For our deploy: issuer and routes live under wiki host with path prefix handled by Caddy
-        return JSONResponse(protected_resource_metadata(resource, public_base))
+def _active_named_key(secret: str, key_store: KeyStore) -> KeyRecord | None:
+    key_store.maybe_reload()
+    key = key_store.match_digest(sha256_hex(secret))
+    if key is None or not key.active:
+        return None
+    return key
+
+
+def make_oauth_routes(key_store: KeyStore, token_store: TokenStore):
+    codes: dict[str, AuthCode] = {}
 
     async def authorize(request: Request) -> Response:
         q = request.query_params
-        client_id = q.get("client_id") or CLIENT_ID
-        redirect_uri = q.get("redirect_uri") or ""
-        state = q.get("state") or ""
-        code_challenge = q.get("code_challenge")
-        code_challenge_method = q.get("code_challenge_method")
-        scope = q.get("scope") or "wiki"
-        response_type = q.get("response_type") or "code"
+        form = await request.form() if request.method == "POST" else None
 
-        if response_type != "code" or not redirect_uri:
+        def field(name: str, default: str = "") -> str:
+            if form is not None and form.get(name) not in (None, ""):
+                return str(form.get(name))
+            return q.get(name) or default
+
+        client_id = field("client_id")
+        redirect_uri = field("redirect_uri")
+        state = field("state")
+        code_challenge = field("code_challenge")
+        code_challenge_method = field("code_challenge_method", "S256").upper()
+        scope = field("scope", "wiki")
+        response_type = field("response_type", "code")
+
+        if client_id not in OAUTH_CLIENTS:
+            return JSONResponse({"error": "invalid_client"}, status_code=400)
+        if response_type != "code" or not redirect_uri or not code_challenge or code_challenge_method != "S256":
             return JSONResponse({"error": "invalid_request"}, status_code=400)
-
-        # Only allow grok.com redirect URIs
-        if "grok.com" not in urlparse(redirect_uri).netloc and "x.ai" not in urlparse(redirect_uri).netloc:
-            return JSONResponse({"error": "invalid_redirect_uri", "detail": redirect_uri}, status_code=400)
+        if not _redirect_allowed(client_id, redirect_uri):
+            return JSONResponse({"error": "invalid_redirect_uri"}, status_code=400)
 
         if request.method == "POST":
-            form = await request.form()
+            assert form is not None
             provided = str(form.get("api_key") or "").strip()
-            if not secrets.compare_digest(provided, api_key):
-                return HTMLResponse(_authorize_html(error="Fel API-nyckel", **_form_hidden(q)), status_code=401)
+            key = _active_named_key(provided, key_store)
+            fields = {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "code_challenge": code_challenge,
+                "code_challenge_method": code_challenge_method,
+                "scope": scope,
+                "response_type": response_type,
+            }
+            if key is None:
+                return HTMLResponse(_authorize_html(error="Fel API-nyckel", **fields), status_code=401)
             code = secrets.token_urlsafe(32)
-            _codes[code] = AuthCode(
-                api_key_ok=True,
+            codes[code] = AuthCode(
+                key_name=key.name,
                 redirect_uri=redirect_uri,
                 code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method,
+                code_challenge_method="S256",
                 client_id=client_id,
                 expires_at=time.time() + 300,
                 scope=scope,
             )
-            # prune
             now = time.time()
-            for k, v in list(_codes.items()):
-                if v.expires_at < now:
-                    _codes.pop(k, None)
+            for stored, rec in list(codes.items()):
+                if rec.expires_at < now:
+                    codes.pop(stored, None)
             parts = list(urlparse(redirect_uri))
             qs = dict(parse_qsl(parts[4], keep_blank_values=True))
             qs["code"] = code
@@ -130,43 +162,46 @@ def make_oauth_routes(api_key: str, public_base: str):
         return HTMLResponse(_authorize_html(**_form_hidden(q)))
 
     async def token(request: Request) -> Response:
-        if request.method == "POST":
-            ctype = request.headers.get("content-type", "")
-            if "application/json" in ctype:
-                body = await request.json()
-            else:
-                form = await request.form()
-                body = dict(form)
+        ctype = request.headers.get("content-type", "")
+        if "application/json" in ctype:
+            body = await request.json()
         else:
-            return JSONResponse({"error": "invalid_request"}, status_code=400)
-
+            form = await request.form()
+            body = dict(form)
         if body.get("grant_type") != "authorization_code":
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
         code = str(body.get("code") or "")
         redirect_uri = str(body.get("redirect_uri") or "")
         verifier = str(body.get("code_verifier") or "")
-        rec = _codes.pop(code, None)
-        if not rec or rec.expires_at < time.time():
+        body_client = str(body.get("client_id") or "")
+        rec = codes.pop(code, None)
+        if rec is None or rec.expires_at < time.time():
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        if rec.redirect_uri != redirect_uri:
+        if rec.redirect_uri != redirect_uri or (body_client and body_client != rec.client_id):
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        if rec.code_challenge and not _verify_pkce(verifier, rec.code_challenge, rec.code_challenge_method):
+        if rec.code_challenge_method != "S256" or not _verify_pkce(verifier, rec.code_challenge):
             return JSONResponse({"error": "invalid_grant", "error_description": "pkce"}, status_code=400)
+        key_store.maybe_reload()
+        key = key_store.by_name(rec.key_name)
+        if key is None or not key.active:
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        access = token_store.issue(key_name=key.name, client_id=rec.client_id)
+        log.info("oauth token utfärdad key=%s client=%s", key.name, rec.client_id)
         return JSONResponse(
             {
-                "access_token": api_key,
+                "access_token": access,
                 "token_type": "bearer",
                 "expires_in": 86400 * 365,
                 "scope": rec.scope,
             }
         )
 
-    return well_known_as, well_known_prm, authorize, token
+    return authorize, token
 
 
-def _form_hidden(q) -> dict:
+def _form_hidden(q) -> dict[str, str]:
     return {
-        "client_id": q.get("client_id") or CLIENT_ID,
+        "client_id": q.get("client_id") or "",
         "redirect_uri": q.get("redirect_uri") or "",
         "state": q.get("state") or "",
         "code_challenge": q.get("code_challenge") or "",
@@ -176,13 +211,13 @@ def _form_hidden(q) -> dict:
     }
 
 
-def _authorize_html(error: str = "", **fields) -> str:
-    err = f'<p style="color:#b00020">{error}</p>' if error else ""
+def _authorize_html(error: str = "", **fields: str) -> str:
+    err = f'<p style="color:#b00020">{html.escape(error)}</p>' if error else ""
     hiddens = "\n".join(
-        f'<input type="hidden" name="{k}" value="{v}" />'
-        for k, v in fields.items()
-        if k != "api_key"
+        f'<input type="hidden" name="{html.escape(key)}" value="{html.escape(value)}" />'
+        for key, value in fields.items()
     )
+    client_id = html.escape(fields.get("client_id") or "")
     return f"""<!doctype html>
 <html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Wiki MCP — behörighet</title>
@@ -191,8 +226,9 @@ body{{font-family:system-ui,sans-serif;max-width:28rem;margin:3rem auto;padding:
 input[type=password],button{{width:100%;padding:.75rem;font-size:1rem;margin:.4rem 0}}
 button{{background:#111;color:#fff;border:0;border-radius:8px}}
 </style></head><body>
-<h1>Anslut Grok till familjens wiki</h1>
-<p>Klistra in MCP API-nyckeln (samma som i <code>/root/family-wiki-mcp/.mcp-api-key</code>).</p>
+<h1>Anslut till familjens wiki</h1>
+<p>Klient: <code>{client_id}</code></p>
+<p>Klistra in den namngivna API-nyckeln. En egen opak åtkomsttoken skapas och kopplas till nyckelns namn. Nyckeln lagras inte som token.</p>
 {err}
 <form method="post">
 {hiddens}

@@ -5,3 +5,6 @@ __pycache__/
 .mcp-api-key
 *.bak*
 .env.bak*
+keys.json
+data/
+oauth-tokens.json

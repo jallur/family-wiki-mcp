@@ -28,7 +28,21 @@
 - **Bots, "Aldenbäck wiki" (xAI-hostad):** OAuth, samma token som efter omkopplingen 16:51. Fungerar 16:55.
 - **OpenWebUI** (chat.aldenback.com på Minin): tool server "aldenbäck wiki", statisk bearer lagrad i OpenWebUI:s DB.
 
-## Kända brister (för Coder)
-- `www-authenticate` i `app/main.py` (rad ~213) har en trasig parameter (`Bearer FAKESECRET_…="…"`). Den ska troligen vara `Bearer resource_metadata="…"`.
-- Prefix kontrolleras bara vid skrivning. Läsning omfattar hela wikin.
-- En enda nyckel, och OAuth lämnar ut den. Se förslaget om nycklar per klient.
+## Författarfältet i bryggan
+
+Wiki.js 2.5.315 sätter `authorId` och `creatorId` till den inloggade användaren. API-nyckeln är användare 1, och `pages.create` / `pages.update` saknar argument för författare. Schemat har `content`, `description`, `editor`, `isPublished`, `isPrivate`, `locale`, `path`, `publishStartDate`, `publishEndDate`, `scriptCss`, `scriptJs`, `tags` och `title`. Inget av dem är en ändringskommentar. `description` är sidans sammanfattning och ska vara den text anroparen skickade. `content` får inte ändras för att smyga in ett namn.
+
+Det fält som GraphQL stöder för en ändringskommentar är `comments.create.content` (behörighet `write:comments` eller `manage:system`, vilket användare 1 har). Bryggan anropar det efter lyckad create och update:
+
+```text
+MCP: sidan skapades av <author eller name> (nyckel <name>).
+MCP: sidan uppdaterades av <author eller name> (nyckel <name>).
+```
+
+Kommentaren är synlig på sidan. Den ingår inte i markdown-innehållet. Misslyckas kommentaren (till exempel rate limit 1/15 s) ligger sidskrivningen kvar och verktyget returnerar `change_comment_error`.
+
+## Kända brister som åtgärdats i koden
+
+- `www-authenticate` är `Bearer resource_metadata="…"`.
+- Läsning filtreras med `read_prefixes`. Tom lista betyder hela wikin. Skrivning kräver `write` och nyckelns `prefixes`.
+- OAuth ger ut en opak token per inloggning, hashad och kopplad till nyckelns namn. `client_id` är `grok-web` eller `bots`. OpenWebUI använder statisk bearer.

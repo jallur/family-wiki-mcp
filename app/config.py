@@ -9,6 +9,13 @@ def _csv(name: str, default: str = "") -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+def _flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     wiki_url: str
@@ -21,6 +28,10 @@ class Settings:
     port: int
     public_host: str
     allowed_origins: tuple[str, ...]
+    keys_file: str
+    token_store_path: str
+    allow_legacy_api_key: bool
+    forwarded_allow_ips: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,8 +49,9 @@ class Settings:
             raise RuntimeError("WIKI_TOKEN or WIKI_TOKEN_FILE is required")
 
         api_key = os.environ.get("MCP_API_KEY", "").strip()
-        if not api_key or len(api_key) < 24:
-            raise RuntimeError("MCP_API_KEY must be set (min 24 chars)")
+        allow_legacy = _flag("ALLOW_LEGACY_API_KEY", True)
+        if allow_legacy and api_key and len(api_key) < 24:
+            raise RuntimeError("MCP_API_KEY must be at least 24 characters when legacy is enabled")
 
         prefixes = _csv("ALLOWED_PREFIXES", "projekt/,familj/,studier/")
         normalized = []
@@ -64,6 +76,10 @@ class Settings:
             port=int(os.environ.get("PORT", "8080")),
             public_host=os.environ.get("PUBLIC_HOST", "mcp.wiki.aldenback.com"),
             allowed_origins=tuple(origins),
+            keys_file=os.environ.get("KEYS_FILE", "/run/secrets/keys.json"),
+            token_store_path=os.environ.get("TOKEN_STORE_PATH", "/data/oauth-tokens.json"),
+            allow_legacy_api_key=allow_legacy,
+            forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "172.20.0.2").strip() or "172.20.0.2",
         )
 
 
