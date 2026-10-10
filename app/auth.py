@@ -21,6 +21,7 @@ class RequestAuth:
     author: str
     client_id: str
     source: str
+    wiki_identity: str
 
     @classmethod
     def from_key(cls, key: KeyRecord, *, client_id: str, source: str) -> "RequestAuth":
@@ -32,6 +33,7 @@ class RequestAuth:
             author=key.author,
             client_id=client_id,
             source=source,
+            wiki_identity=key.wiki_identity,
         )
 
     @property
@@ -48,6 +50,7 @@ def legacy_auth(settings: Settings) -> RequestAuth:
         author="legacy",
         client_id="-",
         source="legacy",
+        wiki_identity="",
     )
 
 

@@ -26,6 +26,7 @@ Drift på cloud01: [DEPLOY.md](DEPLOY.md). Bakgrund om Wiki.js 2.5 och proxykedj
 | `disabled` | `true` stänger nyckeln och återkallar dess OAuth-tokens |
 | `created` | ISO-tid |
 | `author` | Text i ändringskommentaren. Tomt fält faller tillbaka på `name` |
+| `wiki_identity` | Valfritt. Namn på en Wiki.js-användar-JWT, till exempel `jonas`. Utan fältet används API-nyckeln |
 
 `create_page` och `update_page` kräver `write` och att sökvägen träffar nyckelns `prefixes` och serverns allowlist. Det finns inget raderingsverktyg.
 
@@ -60,6 +61,8 @@ MCP: sidan skapades av Jonas (nyckel grok-web).
 ```
 
 `author` används om det är satt, annars `name`.
+
+Om nyckeln har `wiki_identity` går skrivning och läsning med den användarens JWT i stället för API-nyckeln. Wiki.js sätter då `authorId` från användaren, och ändringskommentaren hoppas över. Loggraden finns kvar. JWT:n ligger krypterad i `data/identities/` och förnyas via headern `new-jwt`. Ogiltig identitet faller tillbaka till API-nyckel och en varningskommentar om `IDENTITY_FALLBACK` inte är `false`. Se DEPLOY.md.
 
 ## Logg och klient-IP
 

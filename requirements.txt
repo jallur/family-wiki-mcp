@@ -1,3 +1,4 @@
 mcp==2.1.1
 httpx==0.28.1
 uvicorn[standard]==0.35.0
+cryptography==45.0.7

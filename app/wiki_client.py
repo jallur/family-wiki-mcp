@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import contextvars
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 log = logging.getLogger("wiki-mcp")
+
+# Sätts bara under ett anrop som ska gå som en Wiki.js-användare.
+# Tomt värde betyder API-nyckeln. new-jwt sparas av callbacken och loggas inte.
+wiki_bearer: contextvars.ContextVar[str | None] = contextvars.ContextVar("wiki_bearer", default=None)
+wiki_on_new_jwt: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar(
+    "wiki_on_new_jwt", default=None
+)
+
+PROFILE_QUERY = """
+query {
+  users {
+    profile { id name email }
+  }
+}
+"""
 
 
 # Wiki.js 2.5.315: pages.create och pages.update har inget fält för författare
@@ -37,17 +54,55 @@ class WikiClient:
     def close(self) -> None:
         self._client.close()
 
-    def _post(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _exchange(
+        self,
+        token: str | None,
+        query: str,
+        variables: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str | None]:
+        """POST som API-nyckel eller som token. Sparar new-jwt via callback, utan att logga den."""
+        used = token if token else (wiki_bearer.get() or self.token)
         payload: dict[str, Any] = {"query": query}
         if variables is not None:
             payload["variables"] = variables
-        response = self._client.post(self.url, json=payload)
+        response = self._client.post(
+            self.url,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {used}",
+                "Content-Type": "application/json",
+            },
+        )
+        renewed = (response.headers.get("new-jwt") or "").strip() or None
+        if renewed:
+            callback = wiki_on_new_jwt.get()
+            if callback is not None:
+                try:
+                    callback(renewed)
+                except Exception:
+                    log.error("wiki-identitet: new-jwt kunde inte sparas")
+        if response.status_code in (401, 403):
+            raise WikiError(f"Wiki HTTP {response.status_code}", {"status": response.status_code})
         if response.status_code >= 400:
-            raise WikiError(f"Wiki HTTP {response.status_code}", response.text)
+            raise WikiError(f"Wiki HTTP {response.status_code}", response.text[:500])
         body = response.json()
         if not isinstance(body, dict):
             raise WikiError("Wiki JSON-svar är ogiltigt", body)
+        return body, renewed
+
+    def _post(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        body, _renewed = self._exchange(None, query, variables)
         return body
+
+    def profile_as(self, token: str) -> tuple[dict[str, Any] | None, str | None]:
+        """Läs users.profile med en användar-JWT. Returnerar (profil eller None, new-jwt eller None)."""
+        body, renewed = self._exchange(token, PROFILE_QUERY, None)
+        if body.get("errors"):
+            return None, renewed
+        profile = ((body.get("data") or {}).get("users") or {}).get("profile")
+        if not isinstance(profile, dict):
+            return None, renewed
+        return profile, renewed
 
     def gql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         body = self._post(query, variables)

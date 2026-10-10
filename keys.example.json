@@ -41,7 +41,8 @@
     "expires": null,
     "disabled": true,
     "created": "2026-10-10T00:00:00Z",
-    "author": "Jonas"
+    "author": "Jonas",
+    "wiki_identity": "jonas"
   },
   {
     "name": "nuria",

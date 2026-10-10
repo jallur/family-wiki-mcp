@@ -13,9 +13,10 @@ cp -a docker-compose.yml Dockerfile .env app scripts "$dest/"
 if [ -f keys.json ]; then cp -a keys.json "$dest/"; fi
 if [ -d keys ]; then cp -a keys "$dest/"; fi
 if [ -d data ]; then cp -a data "$dest/"; fi
+if [ -f identity.key ]; then cp -a identity.key "$dest/"; fi
 ```
 
-Kontrollera att `$dest` innehåller `.env` och, om de redan finns, `keys.json` eller `keys/` samt `data/` innan något byggs om.
+Kontrollera att `$dest` innehåller `.env` och, om de redan finns, `keys.json` eller `keys/`, `data/` och `identity.key` innan något byggs om.
 
 ## 2. Skapa keys/keys.json
 
@@ -95,8 +96,13 @@ environment:
   TOKEN_STORE_PATH: /data/oauth-tokens.json
   ALLOW_LEGACY_API_KEY: "true"
   FORWARDED_ALLOW_IPS: "172.20.0.2,158.174.102.122"
+  IDENTITY_KEY_FILE: /run/secrets/identity-key
+  IDENTITY_STORE_DIR: /data/identities
+  IDENTITY_FALLBACK: "true"
+  IDENTITY_RENEW_SECONDS: "43200"
 volumes:
   - /root/wiki/.api-token:/run/secrets/wiki-api-token:ro
+  - /root/family-wiki-mcp/identity.key:/run/secrets/identity-key:ro
   - /root/family-wiki-mcp/keys:/run/secrets/keys:ro
   - /root/family-wiki-mcp/data:/data
 ```
@@ -176,10 +182,10 @@ Mutationssvaret ber bara om `page { id }`. `locale` och andra fält som Wiki.js 
 En rad per verktygsanrop:
 
 ```text
-anrop key=<namn> client=<nyckelns namn eller -> tool=<verktyg> path=<sökväg eller -> result=<ok|denied|error|not_found> ip=<käll-ip>
+anrop key=<namn> client=<nyckelns namn eller -> tool=<verktyg> path=<sökväg eller -> result=<ok|denied|error|not_found> ip=<käll-ip> identity=<identitet, identitet/fallback eller ->
 ```
 
-Statisk bearer har `client=-`. OAuth har nyckelns namn, till exempel `grok-web`, `bots` eller `jonas`, inte OAuth-`client_id`. Nyckel och token ska aldrig finnas i raden.
+Statisk bearer har `client=-`. OAuth har nyckelns namn, till exempel `grok-web`, `bots` eller `jonas`, inte OAuth-`client_id`. `identity=-` betyder att anropet gick med API-nyckeln. Nyckel, API-token och användar-JWT ska aldrig finnas i raden.
 
 ## 9. Återkalla tokens
 
@@ -215,3 +221,68 @@ När en nyckel sätts till `disabled` eller tas bort ur `keys.json` återkallas 
 - [ ] Loggen har `key=`, `client=`, `tool=`, `path=`, `result=` och `ip=` och innehåller inte nyckeln eller token.
 - [ ] Efter Caddy-omladdningen är `ip=` klientens adress, inte bara `158.174.102.122`.
 - [ ] `ALLOW_LEGACY_API_KEY=false` när de tre klienterna är omkopplade, och den gamla nyckeln då ger 401.
+- [ ] `identity.key` är mode 600. `GET /status` visar `jonas` som `ok` och innehåller inte JWT:n.
+- [ ] En sida skapad med nyckeln jonas får Jonas som författare i Wiki.js och ingen MCP-kommentar. Loggen har fortfarande `key=jonas`.
+
+## 11. Wiki-identitet för Jonas
+
+Livetest: nyckeln `jonas` skriver som Jonas egen Wiki.js-användare. Övriga nycklar har inget `wiki_identity` och fungerar som förut, med API-nyckel och ändringskommentar.
+
+Wiki.js 2.5.315 ger en JWT som gäller 30 minuter. Den förnyas inom 14 dagar om anropet har `Content-Type: application/json`: svaret kan då ha headern `new-jwt` (`server/core/auth.js`). `authorId` sätts från den inloggade användaren (`server/models/pages.js`). Därför hoppas ändringskommentaren över när identiteten används. Loggraden per anrop finns kvar.
+
+JWT:erna ligger krypterade med Fernet i `/data/identities/` (värden: `/root/family-wiki-mcp/data/identities/`). Nyckeln är en separat fil, mode 600, inte JWT:n själv. Ett lätt `users.profile`-anrop var 12:e timme, och en gång vid start, håller 14-dagarsfönstret vid liv. Varje `new-jwt` sparas atomiskt. Tokenet loggas aldrig.
+
+`IDENTITY_FALLBACK=true` är standard. Om identiteten saknas eller Wiki.js avvisar den skrivs sidan med API-nyckeln, och kommentaren får en varning. Sätt `IDENTITY_FALLBACK=false` om skrivningen i stället ska nekas. En giltig användare som saknar rättighet eskaleras inte till API-nyckeln. `/health` är fortfarande bara livstecken. `/healthz` och `/status` visar varje identitet som `ok`, `renewing` eller `expired`, utan token.
+
+### Nyckel och fält
+
+Skapa Fernet-nyckeln innan `docker compose up`, annars kan Docker göra mount-källan till en katalog. Kommandot skriver inte ut nyckeln.
+
+```bash
+cd /root/family-wiki-mcp
+umask 077
+python3 -c "from cryptography.fernet import Fernet; open('identity.key','wb').write(Fernet.generate_key())"
+chmod 600 identity.key
+test -f identity.key
+```
+
+I `keys/keys.json`, bara på posten `jonas`:
+
+```json
+"wiki_identity": "jonas"
+```
+
+Spara atomiskt inuti `keys/` så att omladdningen ser bytet. Bygg sedan om:
+
+```bash
+docker compose up -d --build --force-recreate --no-deps family-wiki-mcp
+```
+
+### Hämta JWT ur valvet
+
+Klistra inte in JWT:n i chatten, i ett kommando eller i skalets historik. Låt valvet skriva den på stdout och pipa den direkt in i containern. `docker exec -i` läser stdin. Skriptet vägrar en terminal och vägrar JWT som argument.
+
+```bash
+cd /root/family-wiki-mcp
+vault read -field=jwt secret/wiki/jonas | docker exec -i family-wiki-mcp \
+  python3 scripts/set_identity.py --identity jonas
+```
+
+Om valvet bara kan skriva en fil: lägg den som mode 600, pipa filen, och strimla den direkt. Öppna inte filen i chatten.
+
+```bash
+umask 077
+install -m 600 /dev/null /root/family-wiki-mcp/jonas.jwt
+# fyll filen från valvet utan att eka tokenet i terminalen
+docker exec -i family-wiki-mcp python3 scripts/set_identity.py --identity jonas \
+  < /root/family-wiki-mcp/jonas.jwt
+shred -u /root/family-wiki-mcp/jonas.jwt
+```
+
+Skriptet frågar Wiki.js om `users.profile` och skriver ut `id`, `namn` och `e-post`. Det skriver inte ut tokenet. Kontrollera sedan:
+
+```bash
+curl -sS https://wiki.aldenback.com/status
+```
+
+`identities.jonas.state` ska vara `ok`. Skapa en testsida med Jonas nyckel. Sidan ska sakna MCP-kommentaren, och Wiki.js ska visa Jonas som författare.

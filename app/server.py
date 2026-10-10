@@ -1,6 +1,7 @@
 """ASGI-app: middleware, verktyg, OAuth och loggning."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import json
@@ -21,6 +22,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .auth import RequestAuth, resolve_credential
 from .config import Settings, path_allowed
+from .identity import IdentityDenied, IdentityStore, call_as_identity
 from .keys import KeyStore
 from .oauth import WWW_AUTHENTICATE, make_oauth_routes, oauth_metadata, protected_resource_metadata
 from .tokens import TokenStore
@@ -89,15 +91,24 @@ def _ip_from_ctx(ctx: Context) -> str:
     return current_ip.get()
 
 
-def _log_call(auth: RequestAuth | None, tool: str, path: str, result: str, ip: str) -> None:
+def _log_call(
+    auth: RequestAuth | None,
+    tool: str,
+    path: str,
+    result: str,
+    ip: str,
+    *,
+    identity: str = "-",
+) -> None:
     log.info(
-        "anrop key=%s client=%s tool=%s path=%s result=%s ip=%s",
+        "anrop key=%s client=%s tool=%s path=%s result=%s ip=%s identity=%s",
         auth.name if auth else "-",
         auth.client_id if auth else "-",
         tool,
         path or "-",
         result,
         ip,
+        identity,
     )
 
 
@@ -135,7 +146,12 @@ class ApiKeyMiddleware:
             return
         path = scope.get("path") or ""
         method = scope.get("method") or "GET"
-        if method == "OPTIONS" or path == "/health" or path.startswith("/oauth/") or path.startswith("/.well-known/"):
+        if (
+            method == "OPTIONS"
+            or path in {"/health", "/healthz", "/status"}
+            or path.startswith("/oauth/")
+            or path.startswith("/.well-known/")
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -189,6 +205,7 @@ def create_app(
     token_store: TokenStore,
     *,
     install_signals: bool = False,
+    identities: IdentityStore | None = None,
 ) -> ASGIApp:
     if install_signals:
         signal.signal(signal.SIGHUP, key_store.on_sighup)
@@ -210,6 +227,17 @@ def create_app(
         ),
     )
 
+    def _as_identity(auth: RequestAuth, comment: str | None, operation):
+        return call_as_identity(
+            wiki,
+            identities,
+            identity_name=auth.wiki_identity,
+            key_name=auth.name,
+            fallback=settings.identity_fallback,
+            comment=comment,
+            operation=operation,
+        )
+
     @mcp.tool()
     def list_pages(limit: int = 100, *, ctx: Context) -> str:
         """List wiki pages (id, path, title, description, updatedAt, locale). Filtered by read_prefixes."""
@@ -219,10 +247,13 @@ def create_app(
             _log_call(None, "list_pages", "-", "unauthorized", ip)
             return _ok({"error": "unauthorized"})
         try:
-            pages = wiki.list_pages(limit=limit)
+            pages, label = _as_identity(auth, None, lambda _comment: wiki.list_pages(limit=limit))
             visible = [page for page in pages if _can_read(auth, str(page.get("path") or ""))]
-            _log_call(auth, "list_pages", "-", "ok", ip)
+            _log_call(auth, "list_pages", "-", "ok", ip, identity=label)
             return _ok({"pages": visible})
+        except IdentityDenied as denied:
+            _log_call(auth, "list_pages", "-", "error", ip, identity=denied.name)
+            return _ok({"error": "wiki-identitet ogiltig", "identity": denied.name})
         except Exception as exc:
             _log_call(auth, "list_pages", "-", "error", ip)
             log.exception("verktyg list_pages misslyckades")
@@ -237,10 +268,13 @@ def create_app(
             _log_call(None, "search_pages", "-", "unauthorized", ip)
             return _ok({"error": "unauthorized"})
         try:
-            data = wiki.search(query)
+            data, label = _as_identity(auth, None, lambda _comment: wiki.search(query))
             results = [row for row in (data.get("results") or []) if _can_read(auth, str(row.get("path") or ""))]
-            _log_call(auth, "search_pages", "-", "ok", ip)
+            _log_call(auth, "search_pages", "-", "ok", ip, identity=label)
             return _ok({"results": results, "totalHits": len(results)})
+        except IdentityDenied as denied:
+            _log_call(auth, "search_pages", "-", "error", ip, identity=denied.name)
+            return _ok({"error": "wiki-identitet ogiltig", "identity": denied.name})
         except Exception as exc:
             _log_call(auth, "search_pages", "-", "error", ip)
             log.exception("verktyg search_pages misslyckades")
@@ -258,14 +292,21 @@ def create_app(
             _log_call(auth, "get_page", path, "denied", ip)
             return _ok({"error": "path not allowed", "path": path})
         try:
-            page = wiki.get_by_path(path, locale)
-            if not page and locale is None and settings.locale != "en":
-                page = wiki.get_by_path(path, "en")
+            def _read(_comment: str | None):
+                page = wiki.get_by_path(path, locale)
+                if not page and locale is None and settings.locale != "en":
+                    page = wiki.get_by_path(path, "en")
+                return page
+
+            page, label = _as_identity(auth, None, _read)
             if not page:
-                _log_call(auth, "get_page", path, "not_found", ip)
+                _log_call(auth, "get_page", path, "not_found", ip, identity=label)
                 return _ok({"error": f"not found: {path}"})
-            _log_call(auth, "get_page", path, "ok", ip)
+            _log_call(auth, "get_page", path, "ok", ip, identity=label)
             return _ok({"page": page})
+        except IdentityDenied as denied:
+            _log_call(auth, "get_page", path, "error", ip, identity=denied.name)
+            return _ok({"error": "wiki-identitet ogiltig", "identity": denied.name})
         except Exception as exc:
             _log_call(auth, "get_page", path, "error", ip)
             log.exception("verktyg get_page misslyckades path=%s", path)
@@ -293,17 +334,24 @@ def create_app(
             _log_call(auth, "create_page", path, "denied", ip)
             return _ok({"error": blocked, "path": path, "allowed_prefixes": list(auth.prefixes)})
         try:
-            result = wiki.create_page(
-                path=path,
-                title=title,
-                content=content,
-                description=description,
-                tags=tags or [],
-                locale=locale,
-                change_comment=_change_comment(auth, "skapades"),
+            result, label = _as_identity(
+                auth,
+                _change_comment(auth, "skapades"),
+                lambda comment: wiki.create_page(
+                    path=path,
+                    title=title,
+                    content=content,
+                    description=description,
+                    tags=tags or [],
+                    locale=locale,
+                    change_comment=comment,
+                ),
             )
-            _log_call(auth, "create_page", path, "ok", ip)
+            _log_call(auth, "create_page", path, "ok", ip, identity=label)
             return _ok(result)
+        except IdentityDenied as denied:
+            _log_call(auth, "create_page", path, "error", ip, identity=denied.name)
+            return _ok({"error": "wiki-identitet ogiltig", "identity": denied.name})
         except Exception as exc:
             _log_call(auth, "create_page", path, "error", ip)
             log.exception("verktyg create_page misslyckades path=%s", path)
@@ -331,17 +379,24 @@ def create_app(
             _log_call(auth, "update_page", path, "denied", ip)
             return _ok({"error": blocked, "path": path, "allowed_prefixes": list(auth.prefixes)})
         try:
-            result = wiki.update_page(
-                path=path,
-                content=content,
-                title=title,
-                description=description,
-                tags=tags,
-                locale=locale,
-                change_comment=_change_comment(auth, "uppdaterades"),
+            result, label = _as_identity(
+                auth,
+                _change_comment(auth, "uppdaterades"),
+                lambda comment: wiki.update_page(
+                    path=path,
+                    content=content,
+                    title=title,
+                    description=description,
+                    tags=tags,
+                    locale=locale,
+                    change_comment=comment,
+                ),
             )
-            _log_call(auth, "update_page", path, "ok", ip)
+            _log_call(auth, "update_page", path, "ok", ip, identity=label)
             return _ok(result)
+        except IdentityDenied as denied:
+            _log_call(auth, "update_page", path, "error", ip, identity=denied.name)
+            return _ok({"error": "wiki-identitet ogiltig", "identity": denied.name})
         except Exception as exc:
             _log_call(auth, "update_page", path, "error", ip)
             log.exception("verktyg update_page misslyckades path=%s", path)
@@ -369,6 +424,11 @@ def create_app(
 
     async def health(_: Request) -> Response:
         return JSONResponse({"status": "ok", "service": "family-wiki-mcp"})
+
+    async def identity_status(_: Request) -> Response:
+        rows = identities.status() if identities is not None else {}
+        degraded = any(row.get("state") == "expired" for row in rows.values())
+        return JSONResponse({"status": "degraded" if degraded else "ok", "identities": rows})
 
     origins = list(settings.allowed_origins) + [
         f"https://{settings.public_host}",
@@ -408,17 +468,35 @@ def create_app(
     async def well_known_prm(_: Request) -> Response:
         return JSONResponse(protected_resource_metadata(MCP_RESOURCE, OAUTH_ISSUER))
 
+    async def _renew_loop() -> None:
+        assert identities is not None
+        while True:
+            try:
+                await asyncio.to_thread(identities.renew_all)
+            except Exception:
+                log.error("wiki-identitet förnyelse misslyckades identity=- orsak=loop")
+            await asyncio.sleep(settings.identity_renew_seconds)
+
     @contextlib.asynccontextmanager
     async def lifespan(_: Starlette):
+        task: asyncio.Task[None] | None = None
+        if identities is not None and settings.identity_renew_seconds > 0:
+            task = asyncio.create_task(_renew_loop())
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             wiki.close()
 
     starlette_app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/healthz", identity_status, methods=["GET"]),
+            Route("/status", identity_status, methods=["GET"]),
             Route("/.well-known/oauth-authorization-server", well_known_as, methods=["GET"]),
             Route("/.well-known/oauth-protected-resource", well_known_prm, methods=["GET"]),
             Route("/oauth/authorize", authorize, methods=["GET", "POST"]),
@@ -460,4 +538,5 @@ def create_app_from_env() -> ASGIApp:
     token_store = TokenStore(settings.token_store_path)
     key_store.attach(token_store)
     key_store.load()
-    return create_app(settings, wiki, key_store, token_store, install_signals=True)
+    identities = IdentityStore(settings.identity_store_dir, settings.identity_key_file, wiki)
+    return create_app(settings, wiki, key_store, token_store, install_signals=True, identities=identities)
